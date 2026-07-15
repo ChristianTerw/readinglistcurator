@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+digest.txt
+output.txt
+lesson1_hello_openalex.py
+lesson2_find_related.py
+lesson3_digest.py
