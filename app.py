@@ -15,7 +15,7 @@ New concepts introduced:
 """
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -32,6 +32,8 @@ app = FastAPI()
 # rejects it before our code even runs.
 class AbstractRequest(BaseModel):
     abstract: str
+    journal: str | None = None
+    relevance_weight: float = 0.7
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -43,11 +45,24 @@ def home():
 @app.post("/api/digest")
 def digest(request: AbstractRequest):
     """
-    Receive an abstract (as JSON: {"abstract": "..."}), and return
-    the top 10 related recent papers as JSON.
+    Receive an abstract (plus optional journal and relevance_weight),
+    and return the top 10 related recent papers as JSON.
     """
-    results = get_related_papers(request.abstract, limit=10)
-    return {"results": results}
+    try:
+        results = get_related_papers(
+            request.abstract,
+            journal=request.journal,
+            relevance_weight=request.relevance_weight,
+            limit=10,
+        )
+        return {"results": results}
+    except Exception as e:
+        # Instead of letting the server crash silently, send back a
+        # clear error the frontend can actually show to the person.
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Something went wrong while searching: {e}"},
+        )
 
 
 # The webpage itself, as one big HTML string. For a project this
@@ -74,14 +89,33 @@ HTML_PAGE = """
 
     <textarea id="abstractInput" placeholder="Paste an abstract here..."></textarea>
     <br>
+
+    <label for="journalInput">Target journal (optional):</label><br>
+    <input type="text" id="journalInput" placeholder="e.g. Nature, Management Science" style="width: 100%; padding: 8px; font-size: 1em;">
+    <br><br>
+
+    <label for="weightSlider">Prioritize: Recency &larr;&rarr; Relevance</label><br>
+    <input type="range" id="weightSlider" min="0" max="1" step="0.1" value="0.7" style="width: 100%;">
+    <div id="weightLabel" class="meta">Relevance weight: 0.7</div>
+    <br>
+
     <button onclick="findRelatedPapers()">Find related papers</button>
 
     <p id="status"></p>
     <div id="results"></div>
 
     <script>
+        // Update the little label live as the slider moves.
+        const slider = document.getElementById('weightSlider');
+        const weightLabel = document.getElementById('weightLabel');
+        slider.addEventListener('input', () => {
+            weightLabel.textContent = `Relevance weight: ${slider.value}`;
+        });
+
         async function findRelatedPapers() {
             const abstract = document.getElementById('abstractInput').value;
+            const journal = document.getElementById('journalInput').value;
+            const relevanceWeight = parseFloat(slider.value);
             const status = document.getElementById('status');
             const results = document.getElementById('results');
 
@@ -93,18 +127,38 @@ HTML_PAGE = """
             status.textContent = 'Searching...';
             results.innerHTML = '';
 
-            // Send the abstract to our own /api/digest endpoint,
-            // and wait for the response.
-            const response = await fetch('/api/digest', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ abstract: abstract })
-            });
+            let response;
+            try {
+                response = await fetch('/api/digest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        abstract: abstract,
+                        journal: journal || null,
+                        relevance_weight: relevanceWeight
+                    })
+                });
+            } catch (networkError) {
+                // The request never even reached the server (e.g. no internet).
+                status.textContent = 'Could not reach the server. Please check your connection and try again.';
+                return;
+            }
 
             const data = await response.json();
+
+            if (!response.ok) {
+                // The server responded, but with an error (e.g. our new try/except in app.py).
+                status.textContent = data.error || 'Something went wrong. Please try again.';
+                return;
+            }
+
             status.textContent = '';
 
-            // Build the HTML for each paper and insert it into the page.
+            if (data.results.length === 0) {
+                status.textContent = 'No matches found' + (journal ? ` in "${journal}"` : '') + ' among the most relevant recent papers. Try removing the journal filter or broadening the abstract.';
+                return;
+            }
+
             data.results.forEach((paper, i) => {
                 results.innerHTML += `
                     <div class="paper">
